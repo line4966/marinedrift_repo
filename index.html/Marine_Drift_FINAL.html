@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Marine Drift</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #071d2b;
+      color: #e5f7df;
+      font-family: "Courier New", monospace;
+    }
+    main { width: min(94vw, 800px); text-align: center; }
+    h1 {
+      margin: 0 0 8px;
+      color: #b6ed87;
+      font-size: clamp(2rem, 7vw, 3.4rem);
+      letter-spacing: 0.12em;
+      text-shadow: 4px 4px 0 #315b4b;
+    }
+    p { margin: 0 0 14px; color: #acd0cf; font-size: 0.9rem; }
+    canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      border: 4px solid #b6ed87;
+      background: #126579;
+      image-rendering: pixelated;
+      touch-action: none;
+    }
+    .menu {
+      margin: 0 0 12px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px;
+    }
+    .menu[hidden] { display: none; }
+    button {
+      border: 2px solid #b6ed87;
+      padding: 9px 14px;
+      background: #103c47;
+      color: #e5f7df;
+      font: bold 14px "Courier New", monospace;
+      cursor: pointer;
+    }
+    button:hover,
+    button.selected {
+      background: #b6ed87;
+      color: #102b32;
+    }
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+    #start-button {
+      background: #b6ed87;
+      color: #102b32;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>MARINE DRIFT</h1>
+    <p>Hold ↑ or W to swim up • Release to fall • E for power • Space to start/pause • Press Space 5 times to toggle immortality</p>
+
+    <div id="menu" class="menu">
+      <button class="character-button selected" data-character="turtle" type="button">Turtle — one-hit shield</button>
+      <button class="character-button" data-character="seal" type="button">Seal — invisible for 3 sec</button>
+      <button class="character-button" data-character="shark" type="button">Shark — trash-destroying dash</button>
+      <button id="start-button" type="button">Start Game</button>
+    </div>
+
+    <canvas id="game" width="800" height="450" aria-label="Marine Drift game"></canvas>
+  </main>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+    const menu = document.getElementById("menu");
+    const startButton = document.getElementById("start-button");
+    const characterButtons = document.querySelectorAll(".character-button");
+
+    ctx.imageSmoothingEnabled = false;
+
+    const W = canvas.width;
+    const H = canvas.height;
+    const keys = new Set();
+
+    const turtle = {
+      x: 130,
+      y: H / 2,
+      w: 62,
+      h: 42,
+      velocityY: 0
+    };
+
+    const gravity = 520;
+    const swimForce = -760;
+    const maxFallSpeed = 260;
+    const maxRiseSpeed = -300;
+    const powerRechargeSeconds = 30;
+    const dashSpeed = 3.5;
+
+    const characterUnlocks = {
+      turtle: 0,
+      seal: 250,
+      shark: 500
+    };
+
+    // Unlocks reset on page reload.
+    const unlockedCharacters = new Set(["turtle"]);
+    let unlockNotification = "";
+    let unlockNotificationTimer = 0;
+
+    let selectedCharacter = "turtle";
+    let debris = [];
+    let fish = [];
+    let nets = [];
+    let bubbles = [];
+    let score = 0;
+    let elapsed = 0;
+    let spawnTimer = 0;
+    let fishSpawnTimer = 0;
+    let netSpawnTimer = 0;
+    let lastTime = 0;
+    let state = "ready";
+    let powerReady = true;
+    let powerActive = false;
+    let powerTimer = 0;
+    let rechargeTimer = 0;
+    let pointerDown = false;
+    let pointerTargetY = null;
+    let shieldFlashTimer = 0;
+
+    // Immortality lasts until it is toggled off or the page is refreshed.
+    let spacePressTimes = [];
+    let immortal = false;
+
+    function updateCharacterButtons() {
+      const descriptions = {
+        turtle: "Turtle — one-hit shield",
+        seal: "Seal — invisible for 3 sec",
+        shark: "Shark — trash-destroying dash"
+      };
+
+      characterButtons.forEach(button => {
+        const id = button.dataset.character;
+        const locked = !unlockedCharacters.has(id);
+
+        button.disabled = locked;
+        button.textContent = locked
+          ? `${id[0].toUpperCase()}${id.slice(1)} — unlock at ${characterUnlocks[id]} m`
+          : descriptions[id];
+
+        button.classList.toggle(
+          "selected",
+          id === selectedCharacter && !locked
+        );
+      });
+    }
+
+    function unlockCharacter(id) {
+      if (unlockedCharacters.has(id)) return;
+
+      unlockedCharacters.add(id);
+      updateCharacterButtons();
+      unlockNotification = `${id.toUpperCase()} unlocked!`;
+      unlockNotificationTimer = 3;
+    }
+
+    function startGame() {
+      state = "playing";
+      score = 0;
+      elapsed = 0;
+      spawnTimer = 0;
+      fishSpawnTimer = 0;
+      netSpawnTimer = 0;
+      debris = [];
+      fish = [];
+      nets = [];
+      turtle.x = 130;
+      turtle.y = H / 2;
+      turtle.velocityY = 0;
+      powerReady = true;
+      powerActive = false;
+      powerTimer = 0;
+      rechargeTimer = 0;
+      keys.clear();
+      pointerDown = false;
+      pointerTargetY = null;
+      shieldFlashTimer = 0;
+      unlockNotification = "";
+      unlockNotificationTimer = 0;
+      lastTime = performance.now();
+      menu.hidden = true;
+    }
+
+    function showMenu() {
+      menu.hidden = false;
+      updateCharacterButtons();
+      startButton.textContent = state === "over" ? "Play Again" : "Start Game";
+    }
+
+    characterButtons.forEach(button => {
+      button.addEventListener("click", () => {
+        const id = button.dataset.character;
+        if (!unlockedCharacters.has(id)) return;
+
+        selectedCharacter = id;
+        updateCharacterButtons();
+      });
+    });
+
+    startButton.addEventListener("click", startGame);
+
+    function activatePower() {
+      if (state !== "playing" || !powerReady || powerActive) return;
+
+      powerReady = false;
+      rechargeTimer = 0;
+
+      if (selectedCharacter === "turtle") {
+        powerActive = true;
+      } else if (selectedCharacter === "seal") {
+        powerActive = true;
+        powerTimer = 3;
+      } else {
+        powerActive = true;
+        powerTimer = 2;
+        turtle.x = 205;
+        turtle.velocityY *= 1.5;
+      }
+    }
+
+    function drawTurtle(x, y) {
+      ctx.fillStyle = "#527a48";
+      ctx.fillRect(x - 15, y + 17, 12, 9);
+      ctx.fillRect(x - 20, y + 20, 7, 5);
+      ctx.fillStyle = "#b1ce78";
+      ctx.fillRect(x - 12, y + 19, 5, 2);
+      ctx.fillRect(x - 17, y + 22, 3, 2);
+
+      ctx.fillStyle = "#79a85a";
+      ctx.fillRect(x + 5, y + 34, 24, 9);
+      ctx.fillRect(x + 15, y + 40, 10, 7);
+      ctx.fillStyle = "#5e8249";
+      ctx.fillRect(x + 9, y + 37, 4, 3);
+      ctx.fillRect(x + 16, y + 36, 3, 3);
+      ctx.fillRect(x + 23, y + 39, 4, 3);
+
+      ctx.fillStyle = "#80b965";
+      ctx.fillRect(x + 16, y - 4, 23, 11);
+      ctx.fillRect(x + 29, y - 9, 10, 8);
+      ctx.fillStyle = "#5e8249";
+      ctx.fillRect(x + 20, y - 1, 4, 3);
+      ctx.fillRect(x + 27, y + 1, 3, 3);
+      ctx.fillRect(x + 34, y - 6, 3, 3);
+
+      ctx.fillStyle = "#3f6641";
+      ctx.fillRect(x + 2, y + 7, 48, 31);
+      ctx.fillRect(x + 7, y + 3, 38, 39);
+      ctx.fillStyle = "#789d50";
+      ctx.fillRect(x + 8, y + 8, 36, 26);
+
+      ctx.fillStyle = "#a5bd67";
+      ctx.fillRect(x + 13, y + 10, 12, 9);
+      ctx.fillRect(x + 27, y + 10, 12, 9);
+      ctx.fillRect(x + 11, y + 21, 14, 10);
+      ctx.fillRect(x + 27, y + 21, 14, 10);
+
+      ctx.fillStyle = "#658c4a";
+      ctx.fillRect(x + 24, y + 9, 3, 25);
+      ctx.fillRect(x + 12, y + 19, 29, 3);
+
+      ctx.fillStyle = "#91ac5a";
+      ctx.fillRect(x + 16, y + 12, 5, 5);
+      ctx.fillRect(x + 31, y + 12, 5, 5);
+      ctx.fillRect(x + 15, y + 23, 6, 5);
+      ctx.fillRect(x + 30, y + 23, 7, 5);
+
+      ctx.fillStyle = "#c1ce78";
+      ctx.fillRect(x + 10, y + 11, 3, 3);
+      ctx.fillRect(x + 37, y + 15, 3, 3);
+      ctx.fillRect(x + 21, y + 26, 3, 3);
+      ctx.fillRect(x + 35, y + 27, 3, 3);
+      ctx.fillStyle = "#4c7044";
+      ctx.fillRect(x + 9, y + 15, 2, 2);
+      ctx.fillRect(x + 29, y + 9, 2, 2);
+      ctx.fillRect(x + 39, y + 21, 2, 2);
+      ctx.fillRect(x + 18, y + 30, 2, 2);
+
+      ctx.fillStyle = "#89b765";
+      ctx.fillRect(x + 48, y + 13, 9, 17);
+
+      ctx.fillStyle = "#a5d777";
+      ctx.fillRect(x + 52, y + 9, 20, 23);
+      ctx.fillRect(x + 58, y + 6, 10, 29);
+      ctx.fillRect(x + 67, y + 14, 7, 12);
+
+      ctx.fillStyle = "#80b965";
+      ctx.fillRect(x + 55, y + 11, 4, 4);
+      ctx.fillRect(x + 63, y + 9, 4, 4);
+      ctx.fillRect(x + 68, y + 17, 4, 4);
+      ctx.fillRect(x + 57, y + 27, 5, 3);
+
+      ctx.fillStyle = "#152e36";
+      ctx.fillRect(x + 62, y + 13, 5, 5);
+      ctx.fillStyle = "#d9ed9a";
+      ctx.fillRect(x + 63, y + 13, 2, 2);
+      ctx.fillStyle = "#4d744b";
+      ctx.fillRect(x + 69, y + 23, 5, 2);
+      ctx.fillRect(x + 70, y + 16, 2, 2);
+      ctx.fillRect(x + 66, y + 16, 2, 2);
+    }
+
+    function drawSeal(x, y) {
+      ctx.fillStyle = "#849da5";
+      ctx.fillRect(x - 7, y + 23, 16, 11);
+      ctx.fillRect(x - 14, y + 19, 10, 8);
+
+      ctx.fillStyle = "#a9bec1";
+      ctx.fillRect(x + 2, y + 13, 48, 25);
+      ctx.fillRect(x + 10, y + 7, 33, 34);
+
+      ctx.fillStyle = "#d8dfd3";
+      ctx.fillRect(x + 12, y + 27, 30, 8);
+
+      ctx.fillStyle = "#829ba2";
+      ctx.fillRect(x + 18, y + 33, 19, 8);
+      ctx.fillRect(x + 31, y + 37, 12, 6);
+
+      ctx.fillStyle = "#b8cacc";
+      ctx.fillRect(x + 39, y + 9, 21, 21);
+      ctx.fillRect(x + 52, y + 16, 13, 11);
+
+      ctx.fillStyle = "#253a40";
+      ctx.fillRect(x + 60, y + 18, 4, 4);
+      ctx.fillRect(x + 49, y + 12, 4, 4);
+      ctx.fillRect(x + 54, y + 29, 12, 2);
+      ctx.fillRect(x + 57, y + 32, 9, 2);
+    }
+
+    function drawShark(x, y) {
+      ctx.fillStyle = "#668da2";
+      ctx.fillRect(x - 5, y + 13, 12, 18);
+      ctx.fillRect(x - 14, y + 5, 12, 12);
+      ctx.fillRect(x - 14, y + 28, 12, 12);
+
+      ctx.fillStyle = "#86afbd";
+      ctx.fillRect(x + 4, y + 10, 48, 30);
+      ctx.fillRect(x + 15, y + 5, 29, 40);
+
+      ctx.fillStyle = "#668da2";
+      ctx.fillRect(x + 19, y + 1, 10, 10);
+      ctx.fillRect(x + 24, y - 7, 9, 10);
+
+      ctx.fillStyle = "#d8e1d7";
+      ctx.fillRect(x + 14, y + 30, 34, 8);
+
+      ctx.fillStyle = "#668da2";
+      ctx.fillRect(x + 23, y + 33, 18, 8);
+      ctx.fillRect(x + 33, y + 39, 12, 5);
+
+      ctx.fillStyle = "#86afbd";
+      ctx.fillRect(x + 43, y + 15, 18, 19);
+      ctx.fillStyle = "#192f39";
+      ctx.fillRect(x + 49, y + 13, 4, 4);
+      ctx.fillStyle = "#f4f0d7";
+      ctx.fillRect(x + 49, y + 30, 4, 5);
+      ctx.fillRect(x + 57, y + 30, 4, 5);
+    }
+
+    function drawAnimal() {
+      const invisible = selectedCharacter === "seal" && powerActive;
+      if (invisible && Math.floor(performance.now() / 100) % 2 === 0) return;
+
+      if (selectedCharacter === "turtle") {
+        drawTurtle(turtle.x, Math.round(turtle.y));
+      } else if (selectedCharacter === "seal") {
+        drawSeal(turtle.x, Math.round(turtle.y));
+      } else {
+        drawShark(turtle.x, Math.round(turtle.y));
+      }
+    }
+
+    function drawDebris(item) {
+      const x = Math.round(item.x);
+      const y = Math.round(item.y);
+
+      if (item.type === "bottle") {
+        ctx.fillStyle = "#4ba7a0";
+        ctx.fillRect(x + 5, y + 8, 26, 43);
+        ctx.fillRect(x + 11, y + 2, 14, 8);
+        ctx.fillStyle = "#a8ddd0";
+        ctx.fillRect(x + 9, y + 15, 5, 25);
+        ctx.fillStyle = "#d6b46a";
+        ctx.fillRect(x + 17, y + 4, 8, 4);
+      } else if (item.type === "can") {
+        ctx.fillStyle = "#bd7860";
+        ctx.fillRect(x, y + 4, 43, 24);
+        ctx.fillStyle = "#e0b77b";
+        ctx.fillRect(x + 4, y, 35, 5);
+        ctx.fillRect(x + 4, y + 27, 35, 4);
+        ctx.fillStyle = "#814f4b";
+        ctx.fillRect(x + 10, y + 11, 20, 4);
+      } else if (item.type === "bag") {
+        ctx.fillStyle = "#d6d1b3";
+        ctx.fillRect(x + 7, y + 8, 29, 34);
+        ctx.fillRect(x + 2, y + 14, 7, 18);
+        ctx.fillRect(x + 34, y + 12, 8, 21);
+        ctx.fillStyle = "#9caa98";
+        ctx.fillRect(x + 15, y + 15, 14, 4);
+      } else {
+        ctx.fillStyle = "#755d4d";
+        ctx.fillRect(x + 5, y + 8, 42, 30);
+        ctx.fillRect(x, y + 14, 52, 18);
+        ctx.fillStyle = "#a9845c";
+        ctx.fillRect(x + 11, y + 14, 30, 4);
+        ctx.fillRect(x + 13, y + 28, 27, 4);
+      }
+    }
+
+    function drawFish(item) {
+      const x = Math.round(item.x);
+      const y = Math.round(item.y);
+      const colors = ["#ffd16a", "#f49b72", "#b8e3a0", "#d9a5dc"];
+
+      ctx.fillStyle = colors[item.color];
+      ctx.fillRect(x + 5, y + 4, 18, 10);
+      ctx.fillRect(x + 10, y + 1, 9, 16);
+      ctx.fillRect(x, y + 7, 6, 5);
+      ctx.fillStyle = "#17343d";
+      ctx.fillRect(x + 18, y + 6, 3, 3);
+    }
+
+    function spawnNet() {
+      const w = 120 + Math.random() * 50;
+      const h = 85 + Math.random() * 45;
+
+      nets.push({
+        x: W + 20,
+        y: 30 + Math.random() * (H - h - 60),
+        w,
+        h
+      });
+    }
+
+    function drawNet(net) {
+      const x = Math.round(net.x);
+      const y = Math.round(net.y);
+      const w = Math.round(net.w);
+      const h = Math.round(net.h);
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x + 4, y + 4, w - 8, h - 8);
+      ctx.clip();
+
+      ctx.strokeStyle = "#d8c07a";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+
+      for (let startX = x - h; startX < x + w + h; startX += 18) {
+        ctx.moveTo(startX, y);
+        ctx.lineTo(startX + h, y + h);
+        ctx.moveTo(startX + h, y);
+        ctx.lineTo(startX, y + h);
+      }
+
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.fillStyle = "#795b42";
+      ctx.fillRect(x, y, w, 5);
+      ctx.fillRect(x, y + h - 5, w, 5);
+      ctx.fillRect(x, y, 5, h);
+      ctx.fillRect(x + w - 5, y, 5, h);
+
+      ctx.fillStyle = "#e0c17d";
+      for (let knotX = x + 8; knotX < x + w - 4; knotX += 24) {
+        ctx.fillRect(knotX, y + 1, 5, 5);
+        ctx.fillRect(knotX, y + h - 6, 5, 5);
+      }
+      for (let knotY = y + 8; knotY < y + h - 4; knotY += 24) {
+        ctx.fillRect(x + 1, knotY, 5, 5);
+        ctx.fillRect(x + w - 6, knotY, 5, 5);
+      }
+    }
+
+    function drawCharacterChoices() {
+      const choices = [
+        { id: "turtle", name: "TURTLE", power: "ONE-HIT SHIELD" },
+        { id: "seal", name: "SEAL", power: "3-SEC INVISIBILITY" },
+        { id: "shark", name: "SHARK", power: "2-SEC DASH" }
+      ];
+      const centers = [145, 400, 655];
+      const cardY = 290;
+
+      ctx.textAlign = "center";
+
+      choices.forEach(choice => {
+        const index = choices.indexOf(choice);
+        const centerX = centers[index];
+        const selected = selectedCharacter === choice.id;
+        const locked = !unlockedCharacters.has(choice.id);
+
+        ctx.fillStyle = selected
+          ? "rgba(182, 237, 135, 0.2)"
+          : "rgba(7, 29, 43, 0.85)";
+        ctx.fillRect(centerX - 115, cardY, 230, 130);
+
+        ctx.strokeStyle = selected ? "#b6ed87" : "#6b9b9b";
+        ctx.lineWidth = selected ? 3 : 2;
+        ctx.strokeRect(centerX - 115, cardY, 230, 130);
+
+        ctx.save();
+        ctx.globalAlpha = locked ? 0.35 : 1;
+        ctx.translate(centerX, cardY + 42);
+        ctx.scale(0.48, 0.48);
+
+        if (choice.id === "turtle") {
+          drawTurtle(-30, -20);
+        } else if (choice.id === "seal") {
+          drawSeal(-30, -20);
+        } else {
+          drawShark(-30, -20);
+        }
+
+        ctx.restore();
+
+        if (locked) {
+          ctx.fillStyle = "#e5f7df";
+          ctx.font = "bold 15px Courier New";
+          ctx.fillText("LOCKED", centerX, cardY + 91);
+
+          ctx.fillStyle = "#acd0cf";
+          ctx.font = "11px Courier New";
+          ctx.fillText(
+            `REACH ${characterUnlocks[choice.id]} M`,
+            centerX,
+            cardY + 112
+          );
+        } else {
+          ctx.fillStyle = selected ? "#c5ef91" : "#e5f7df";
+          ctx.font = "bold 15px Courier New";
+          ctx.fillText(choice.name, centerX, cardY + 91);
+
+          ctx.fillStyle = "#acd0cf";
+          ctx.font = "11px Courier New";
+          ctx.fillText(choice.power, centerX, cardY + 112);
+        }
+      });
+
+      ctx.textAlign = "left";
+    }
+
+    function drawBackground(dt) {
+      ctx.fillStyle = "#126579";
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.fillStyle = "#19758a";
+      for (let i = 0; i < 7; i++) {
+        const y = (i * 73 + elapsed * 18) % H;
+        ctx.fillRect(0, y, W, 2);
+      }
+
+      for (let i = 0; i < 9; i++) {
+        const x = ((i * 113 - elapsed * 28) % (W + 60) + W + 60) % (W + 60);
+        const base = H - 10;
+        ctx.fillStyle = i % 2 ? "#17634f" : "#1d7053";
+        ctx.fillRect(x, base - 34, 5, 34);
+        ctx.fillRect(x + 5, base - 24, 5, 24);
+        ctx.fillRect(x - 5, base - 16, 5, 16);
+      }
+
+      ctx.fillStyle = "#d3c48a";
+      ctx.fillRect(0, H - 7, W, 7);
+
+      if (Math.random() < dt * 2) {
+        bubbles.push({
+          x: W + 4,
+          y: 25 + Math.random() * (H - 55),
+          r: 2 + Math.floor(Math.random() * 3)
+        });
+      }
+
+      ctx.fillStyle = "#8bd5d0";
+      bubbles.forEach(bubble => {
+        bubble.x -= 65 * dt;
+        ctx.fillRect(
+          Math.round(bubble.x),
+          Math.round(bubble.y),
+          bubble.r,
+          bubble.r
+        );
+      });
+      bubbles = bubbles.filter(bubble => bubble.x > -8);
+    }
+
+    function spawnOneDebris(x = W + 10) {
+      const types = ["bottle", "can", "bag", "crate"];
+      const type = types[Math.floor(Math.random() * types.length)];
+      const size = type === "can"
+        ? [43, 31]
+        : type === "crate"
+          ? [52, 42]
+          : [44, 54];
+
+      debris.push({
+        x,
+        y: 25 + Math.random() * (H - size[1] - 50),
+        w: size[0],
+        h: size[1],
+        type
+      });
+    }
+
+    function spawnTrashWave() {
+      const waveSize = Math.min(2 + Math.floor(elapsed / 15), 6);
+
+      for (let i = 0; i < waveSize; i++) {
+        spawnOneDebris(W + 10 + i * 95);
+      }
+    }
+
+    function spawnFish() {
+      fish.push({
+        x: W + 20,
+        y: 40 + Math.random() * (H - 95),
+        speed: 150 + Math.random() * 100,
+        color: Math.floor(Math.random() * 4)
+      });
+    }
+
+    function getPowerLabel() {
+      if (selectedCharacter === "seal") return "INVISIBILITY";
+      if (selectedCharacter === "shark") return "DASH";
+      return "SHIELD";
+    }
+
+    function endGame() {
+      state = "over";
+      keys.clear();
+      pointerDown = false;
+      pointerTargetY = null;
+      showMenu();
+    }
+
+    function update(dt) {
+      if (state !== "playing") return;
+
+      elapsed += dt;
+      score += dt * 10;
+
+      if (score >= characterUnlocks.seal) unlockCharacter("seal");
+      if (score >= characterUnlocks.shark) unlockCharacter("shark");
+      unlockNotificationTimer = Math.max(0, unlockNotificationTimer - dt);
+
+      shieldFlashTimer = Math.max(0, shieldFlashTimer - dt);
+
+      if (!powerReady && !powerActive) {
+        rechargeTimer += dt;
+        if (rechargeTimer >= powerRechargeSeconds) {
+          powerReady = true;
+          rechargeTimer = 0;
+        }
+      }
+
+      if (powerActive && selectedCharacter !== "turtle") {
+        powerTimer -= dt;
+        if (powerTimer <= 0) {
+          powerActive = false;
+          powerTimer = 0;
+          if (selectedCharacter === "shark") turtle.x = 130;
+        }
+      }
+
+      const swimmingUp =
+        keys.has("ArrowUp") || keys.has("w") || keys.has("W");
+
+      if (pointerDown && pointerTargetY !== null) {
+        const difference = pointerTargetY - (turtle.y + turtle.h / 2);
+        turtle.velocityY += (difference < -8 ? swimForce : gravity) * dt;
+      } else {
+        turtle.velocityY += (swimmingUp ? swimForce : gravity) * dt;
+      }
+
+      turtle.velocityY = Math.max(
+        maxRiseSpeed,
+        Math.min(maxFallSpeed, turtle.velocityY)
+      );
+      turtle.y += turtle.velocityY * dt;
+
+      if (turtle.y < 12) {
+        turtle.y = 12;
+        turtle.velocityY = Math.max(0, turtle.velocityY);
+      }
+
+      if (turtle.y > H - turtle.h - 12) {
+        turtle.y = H - turtle.h - 12;
+        turtle.velocityY = Math.min(0, turtle.velocityY);
+      }
+
+      const difficulty = Math.min(elapsed / 90, 1);
+      const debrisSpeed = 260 + difficulty * 360;
+      const spawnInterval = 0.85 - difficulty * 0.35;
+
+      spawnTimer += dt;
+      if (spawnTimer >= spawnInterval) {
+        spawnTrashWave();
+        spawnTimer = 0;
+      }
+
+      const effectiveDebrisSpeed =
+        powerActive && selectedCharacter === "shark"
+          ? debrisSpeed * dashSpeed
+          : debrisSpeed;
+
+      debris.forEach(item => {
+        item.x -= effectiveDebrisSpeed * dt;
+      });
+      debris = debris.filter(item => item.x + item.w > -10);
+
+      if (elapsed >= 12) {
+        netSpawnTimer += dt;
+        const netInterval = Math.max(4.5, 8 - elapsed * 0.02);
+
+        if (netSpawnTimer >= netInterval) {
+          spawnNet();
+          netSpawnTimer = 0;
+        }
+      }
+
+      nets.forEach(net => {
+        net.x -= effectiveDebrisSpeed * dt;
+      });
+      nets = nets.filter(net => net.x + net.w > -10);
+
+      fishSpawnTimer += dt;
+      if (fishSpawnTimer >= 1.8) {
+        spawnFish();
+        fishSpawnTimer = 0;
+      }
+      fish.forEach(item => {
+        item.x -= item.speed * dt;
+      });
+      fish = fish.filter(item => item.x > -35);
+
+      const playerBox = {
+        x: turtle.x + 5,
+        y: turtle.y + 5,
+        w: 58,
+        h: 38
+      };
+
+      for (let i = debris.length - 1; i >= 0; i--) {
+        const item = debris[i];
+        const hit =
+          playerBox.x < item.x + item.w - 5 &&
+          playerBox.x + playerBox.w > item.x + 5 &&
+          playerBox.y < item.y + item.h - 5 &&
+          playerBox.y + playerBox.h > item.y + 5;
+
+        if (!hit) continue;
+        if (immortal) continue;
+
+        if (selectedCharacter === "seal" && powerActive) continue;
+
+        if (selectedCharacter === "shark" && powerActive) {
+          debris.splice(i, 1);
+          continue;
+        }
+
+        if (selectedCharacter === "turtle" && powerActive) {
+          debris.splice(i, 1);
+          powerActive = false;
+          rechargeTimer = 0;
+          shieldFlashTimer = 0.45;
+          continue;
+        }
+
+        endGame();
+        break;
+      }
+
+      if (state === "playing") {
+        for (let i = nets.length - 1; i >= 0; i--) {
+          const net = nets[i];
+          const hit =
+            playerBox.x < net.x + net.w &&
+            playerBox.x + playerBox.w > net.x &&
+            playerBox.y < net.y + net.h &&
+            playerBox.y + playerBox.h > net.y;
+
+          if (!hit) continue;
+          if (immortal) continue;
+
+          if (selectedCharacter === "seal" && powerActive) continue;
+
+          if (selectedCharacter === "shark" && powerActive) {
+            nets.splice(i, 1);
+            continue;
+          }
+
+          if (selectedCharacter === "turtle" && powerActive) {
+            nets.splice(i, 1);
+            powerActive = false;
+            rechargeTimer = 0;
+            shieldFlashTimer = 0.45;
+            continue;
+          }
+
+          endGame();
+          break;
+        }
+      }
+    }
+
+    function draw() {
+      drawBackground(state === "playing" ? 1 / 60 : 0);
+
+      fish.forEach(drawFish);
+      debris.forEach(drawDebris);
+      nets.forEach(drawNet);
+
+      if (powerActive && selectedCharacter === "turtle") {
+        ctx.strokeStyle = "#9ff8ff";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.ellipse(turtle.x + 30, turtle.y + 21, 40, 31, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      if (powerActive && selectedCharacter === "shark") {
+        ctx.fillStyle = "rgba(198, 245, 255, 0.7)";
+        for (let i = 0; i < 5; i++) {
+          ctx.fillRect(turtle.x - 25 - i * 17, turtle.y + 8 + i * 7, 12, 3);
+        }
+      }
+
+      if (shieldFlashTimer > 0) {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(turtle.x + 50, turtle.y + 6, 8, 8);
+      }
+
+      drawAnimal();
+
+      ctx.fillStyle = "#e5f7df";
+      ctx.font = "bold 20px Courier New";
+      ctx.textAlign = "left";
+      ctx.fillText("DISTANCE: " + Math.floor(score) + " m", 18, 30);
+
+      let powerText;
+      if (immortal) {
+        powerText = "IMMORTAL";
+      } else if (powerActive) {
+        powerText = selectedCharacter === "turtle"
+          ? "SHIELD: ACTIVE"
+          : getPowerLabel() + ": " + powerTimer.toFixed(1) + "s";
+      } else if (powerReady) {
+        powerText = getPowerLabel() + ": READY (E)";
+      } else {
+        powerText = getPowerLabel() + ": " +
+          Math.ceil(powerRechargeSeconds - rechargeTimer) + "s";
+      }
+
+      ctx.fillStyle = immortal
+        ? "#ffd16a"
+        : powerActive
+          ? "#9ff8ff"
+          : powerReady
+            ? "#c5ef91"
+            : "#e5f7df";
+
+      ctx.font = "bold 16px Courier New";
+      ctx.textAlign = "right";
+      ctx.fillText(powerText, W - 18, 30);
+      ctx.textAlign = "left";
+
+      if (state === "playing" && unlockNotificationTimer > 0) {
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#c5ef91";
+        ctx.font = "bold 22px Courier New";
+        ctx.fillText(unlockNotification, W / 2, 70);
+        ctx.textAlign = "left";
+      }
+
+      if (state === "paused") {
+        ctx.fillStyle = "rgba(4, 23, 35, 0.76)";
+        ctx.fillRect(0, 0, W, H);
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#c5ef91";
+        ctx.font = "bold 38px Courier New";
+        ctx.fillText("PAUSED", W / 2, H / 2 - 20);
+        ctx.fillStyle = "#e5f7df";
+        ctx.font = "18px Courier New";
+        ctx.fillText("Press Space to resume", W / 2, H / 2 + 20);
+        ctx.textAlign = "left";
+      } else if (state === "ready" || state === "over") {
+        ctx.fillStyle = "rgba(4, 23, 35, 0.84)";
+        ctx.fillRect(0, 0, W, H);
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#c5ef91";
+        ctx.font = "bold 38px Courier New";
+        ctx.fillText("MARINE DRIFT", W / 2, H / 2 - 92);
+
+        ctx.fillStyle = "#e5f7df";
+        ctx.font = "18px Courier New";
+
+        if (state === "over") {
+          ctx.fillText(
+            "GAME OVER — Distance: " + Math.floor(score) + " m",
+            W / 2,
+            H / 2 - 55
+          );
+          ctx.fillText(
+            "Press Space or Play Again above to restart",
+            W / 2,
+            H / 2 - 30
+          );
+        } else {
+          ctx.fillText("Choose your animal", W / 2, H / 2 - 55);
+          ctx.font = "14px Courier New";
+          ctx.fillText(
+            "Click an icon below • Space or Start Game to begin",
+            W / 2,
+            H / 2 - 30
+          );
+        }
+
+        drawCharacterChoices();
+
+        ctx.fillStyle = "#e5f7df";
+        ctx.font = "13px Courier New";
+        ctx.fillText(
+          "↑ / W: Swim Up • E: Power • Space: Start / Pause / Restart",
+          W / 2,
+          440
+        );
+        ctx.textAlign = "left";
+      }
+    }
+
+    function loop(time) {
+      const dt = Math.min((time - lastTime) / 1000 || 0, 0.04);
+      lastTime = time;
+      update(dt);
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    window.addEventListener("keydown", event => {
+      if (["ArrowUp", "ArrowDown", " "].includes(event.key)) {
+        event.preventDefault();
+      }
+
+      if (event.code === "Space") {
+        if (event.repeat) return;
+
+        const now = performance.now();
+        spacePressTimes = spacePressTimes.filter(time => now - time <= 10000);
+        spacePressTimes.push(now);
+
+        if (spacePressTimes.length >= 5) {
+          spacePressTimes = [];
+          immortal = !immortal;
+
+          if (state === "ready" || state === "over") {
+            startGame();
+          } else if (state === "paused") {
+            state = "playing";
+            keys.clear();
+            lastTime = performance.now();
+          }
+
+          return;
+        }
+
+        if (state === "ready") {
+          startGame();
+        } else if (state === "playing") {
+          state = "paused";
+          keys.clear();
+          pointerDown = false;
+          pointerTargetY = null;
+        } else if (state === "paused") {
+          state = "playing";
+          keys.clear();
+          lastTime = performance.now();
+        }
+
+        return;
+      }
+
+      if (state === "paused" || state === "over") return;
+
+      if (event.code === "KeyE") {
+        activatePower();
+        return;
+      }
+
+      if (state === "playing") {
+        keys.add(event.key);
+      }
+    });
+
+    window.addEventListener("keyup", event => {
+      keys.delete(event.key);
+    });
+
+    canvas.addEventListener("pointerdown", event => {
+      const rect = canvas.getBoundingClientRect();
+      const pointerX = (event.clientX - rect.left) * W / rect.width;
+      const pointerY = (event.clientY - rect.top) * H / rect.height;
+
+      if (state === "ready" || state === "over") {
+        const cardY = 290;
+        const centers = [145, 400, 655];
+        const characters = ["turtle", "seal", "shark"];
+
+        if (pointerY >= cardY && pointerY <= cardY + 130) {
+          const clickedIndex = centers.findIndex(
+            center => Math.abs(pointerX - center) <= 115
+          );
+
+          if (
+            clickedIndex !== -1 &&
+            unlockedCharacters.has(characters[clickedIndex])
+          ) {
+            selectedCharacter = characters[clickedIndex];
+            showMenu();
+          }
+        }
+
+        return;
+      }
+
+      if (state !== "playing") return;
+
+      if (pointerX > W - 230 && pointerY < 55) {
+        activatePower();
+        return;
+      }
+
+      pointerDown = true;
+      steer(event);
+    });
+
+    canvas.addEventListener("pointermove", event => {
+      if (pointerDown && state === "playing") {
+        steer(event);
+      }
+    });
+
+    window.addEventListener("pointerup", () => {
+      pointerDown = false;
+      pointerTargetY = null;
+    });
+
+    function steer(event) {
+      const rect = canvas.getBoundingClientRect();
+      pointerTargetY = (event.clientY - rect.top) * H / rect.height;
+    }
+
+    showMenu();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
